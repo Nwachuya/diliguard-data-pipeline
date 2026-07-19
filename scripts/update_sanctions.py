@@ -21,23 +21,15 @@ def main():
     data = response.json()
     
     # Extract URLs for the specific files we want
-    csv_url = None
-    json_url = None
-    
     for resource in data.get("resources", []):
         if resource.get("name") == "targets.simple.csv":
             csv_url = resource.get("url")
-        elif resource.get("name") == "entities.ftm.json":
-            json_url = resource.get("url")
             
-    if not csv_url or not json_url:
-        raise ValueError("Could not find required resource URLs in index.json")
+    if not csv_url:
+        raise ValueError("Could not find targets.simple.csv URL in index.json")
 
     # 1. Download simplified CSV for quick screening
     download_file(csv_url, "targets.simple.csv")
-    
-    # 2. Download the rich FTM JSON for AI/Graphs
-    download_file(json_url, "entities.ftm.json")
     
     # 3. Convert CSV to Parquet using DuckDB
     print("Converting targets.simple.csv to Parquet format...")
