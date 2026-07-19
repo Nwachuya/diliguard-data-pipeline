@@ -23,15 +23,23 @@ def main():
     data = response.json()
     
     # Extract URLs for the specific files we want
+    csv_url = None
+    ftm_url = None
     for resource in data.get("resources", []):
         if resource.get("name") == "targets.simple.csv":
             csv_url = resource.get("url")
+        elif resource.get("name") == "entities.ftm.json":
+            ftm_url = resource.get("url")
             
     if not csv_url:
         raise ValueError("Could not find targets.simple.csv URL in index.json")
 
     # 1. Download simplified CSV for quick screening
     download_file(csv_url, "targets.simple.csv")
+    
+    # 2. Download FollowTheMoney JSON for deep diligence traces
+    if ftm_url:
+        download_file(ftm_url, "entities.ftm.json")
     
     # 3. Convert CSV to Parquet using Polars
     print("Converting targets.simple.csv to Parquet format using Polars...")
