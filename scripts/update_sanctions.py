@@ -37,8 +37,9 @@ def main():
     print("Converting targets.simple.csv to Parquet format using Polars...")
     import polars as pl
     
-    # Read the CSV completely out-of-core and stream it straight into a highly compressed Parquet file
-    pl.scan_csv('targets.simple.csv', ignore_errors=True, infer_schema_length=0).sink_parquet('targets.simple.parquet')
+    # Read the CSV entirely into memory (the 500MB file will comfortably fit in the 7GB runner RAM) and write to Parquet
+    df = pl.read_csv('targets.simple.csv', ignore_errors=True, infer_schema_length=0)
+    df.write_parquet('targets.simple.parquet')
     
     print("Conversion successful. Output: targets.simple.parquet")
 
