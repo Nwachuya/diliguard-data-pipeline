@@ -53,7 +53,24 @@ def main():
 
     # Cleanup the raw CSV to save disk space before Wrangler upload
     os.remove("targets.simple.csv")
-    print("Cleaned up temporary CSV file.")
+    # 4. Convert FTM JSON to a Key-Value Parquet file
+    if ftm_url and os.path.exists("entities.ftm.json"):
+        print("Converting entities.ftm.json to a Key-Value Parquet file...")
+        import duckdb
+        duckdb.sql("SET memory_limit='4GB';")
+        duckdb.sql("SET temp_directory='tmp.duckdb';")
+        query = """
+        COPY (
+            SELECT 
+                json_extract_string(json, '$.id') AS id, 
+                json AS data 
+            FROM read_json_objects('entities.ftm.json', format='newline_delimited')
+        ) TO 'entities.ftm.parquet' (FORMAT PARQUET);
+        """
+        duckdb.sql(query)
+        print("FTM JSON conversion successful. Output: entities.ftm.parquet")
+        os.remove("entities.ftm.json")
+        print("Cleaned up temporary FTM JSON file.")
 
 if __name__ == "__main__":
     main()

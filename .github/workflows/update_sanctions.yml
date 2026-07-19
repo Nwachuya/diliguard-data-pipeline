@@ -34,4 +34,4 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           aws s3 cp targets.simple.parquet s3://diliguard-sanctions-test/targets.simple.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          aws s3 cp entities.ftm.json s3://diliguard-sanctions-test/entities.ftm.json --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          aws s3 cp entities.ftm.parquet s3://diliguard-sanctions-test/entities.ftm.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
