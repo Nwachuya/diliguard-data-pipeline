@@ -7,11 +7,13 @@ INDEX_URL = "https://data.opensanctions.org/datasets/latest/default/index.json"
 
 def download_file(url, local_filename):
     print(f"Downloading {url} to {local_filename}...")
-    # Stream the download to avoid blowing up memory
+    # Stream the download using iter_content so requests automatically decompresses GZIP encoding
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         with open(local_filename, 'wb') as f:
-            shutil.copyfileobj(r.raw, f)
+            for chunk in r.iter_content(chunk_size=8192 * 1024): 
+                if chunk:
+                    f.write(chunk)
     print(f"Downloaded {local_filename}")
 
 def main():
