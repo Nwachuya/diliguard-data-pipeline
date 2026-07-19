@@ -31,25 +31,13 @@ def main():
     # 1. Download simplified CSV for quick screening
     download_file(csv_url, "targets.simple.csv")
     
-    # 3. Convert CSV to Parquet using Pandas/PyArrow
-    print("Converting targets.simple.csv to Parquet format...")
-    import pandas as pd
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    # Read CSV in 100k row chunks to strictly bound memory usage
-    csv_iterator = pd.read_csv('targets.simple.csv', chunksize=100000, dtype=str, on_bad_lines='skip')
+    # 3. Convert CSV to Parquet using Polars
+    print("Converting targets.simple.csv to Parquet format using Polars...")
+    import polars as pl
     
-    parquet_writer = None
-    for i, chunk in enumerate(csv_iterator):
-        table = pa.Table.from_pandas(chunk)
-        if i == 0:
-            parquet_writer = pq.ParquetWriter('targets.simple.parquet', table.schema)
-        parquet_writer.write_table(table)
-        
-    if parquet_writer:
-        parquet_writer.close()
-        
+    # Read the CSV completely out-of-core and stream it straight into a highly compressed Parquet file
+    pl.scan_csv('targets.simple.csv', ignore_errors=True, infer_schema_length=0).sink_parquet('targets.simple.parquet')
+    
     print("Conversion successful. Output: targets.simple.parquet")
 
     # Cleanup the raw CSV to save disk space before Wrangler upload
