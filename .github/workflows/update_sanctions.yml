@@ -22,8 +22,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
-          python scripts/update_sanctions.py
+          python -u scripts/update_sanctions.py
 
       - name: Upload Parquet to Cloudflare R2
         env:
