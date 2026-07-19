@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           
@@ -25,17 +25,18 @@ jobs:
         run: |
           python scripts/update_sanctions.py
 
-      - name: Install Wrangler
-        run: npm install -g wrangler
-
       - name: Upload Parquet to Cloudflare R2
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
         run: |
-          wrangler r2 object put diliguard-sanctions-test/targets.simple.parquet --file=targets.simple.parquet
+          aws s3 cp targets.simple.parquet s3://diliguard-sanctions-test/targets.simple.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           
       - name: Upload FTM JSON to Cloudflare R2
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
         run: |
-          wrangler r2 object put diliguard-sanctions-test/entities.ftm.json --file=entities.ftm.json
+          aws s3 cp entities.ftm.json s3://diliguard-sanctions-test/entities.ftm.json --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
