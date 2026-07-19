@@ -33,7 +33,10 @@ def main():
     
     # 3. Convert CSV to Parquet using DuckDB
     print("Converting targets.simple.csv to Parquet format...")
-    # DuckDB will seamlessly read the CSV into memory in optimized chunks and write out a highly compressed Parquet file
+    # Configure DuckDB to stay within GitHub Actions 7GB memory limit and spool to disk
+    duckdb.sql("SET memory_limit='4GB';")
+    duckdb.sql("SET temp_directory='tmp.duckdb';")
+    
     query = """
     COPY (
         SELECT * FROM read_csv_auto('targets.simple.csv', all_varchar=True)
