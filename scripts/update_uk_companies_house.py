@@ -9,22 +9,29 @@ This snapshot does not include Persons with Significant Control (PSC/UBO) data �
 that is a separate Companies House product/API — so `ubo_names` is left as None (a
 real gap), not fabricated.
 
+~5.7M rows / ~2GB decompressed CSV — this is done with Polars-native/lazy operations
+throughout (never a Python per-row loop building 5.7M dicts, and never the full CSV
+held in memory as a Python bytes object) after an earlier version OOM-killed the
+GitHub Actions runner immediately after a successful download.
+
 If the download or parse fails, this script exits non-zero and writes nothing.
 """
-import io
 import os
 import re
 import sys
 import zipfile
+from datetime import datetime, timezone
 
 import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.http import download_file, get_with_retry
-from common.parquet_io import write_registry_parquet
+from common.schema import KNOWN_FAKE_SENTINELS, PIPELINE_VERSION
 
 INDEX_URL = "https://download.companieshouse.gov.uk/en_output.html"
 ZIP_LOCAL_PATH = "uk_ch_basic_company_data.zip"
+CSV_LOCAL_PATH = "uk_ch_basic_company_data.csv"
+OUTPUT_PATH = "uk_companies_house.parquet"
 
 ADDRESS_FIELDS = [
     "RegAddress.AddressLine1",
@@ -47,12 +54,6 @@ def _resolve_current_zip_url() -> str:
     return f"https://download.companieshouse.gov.uk/{match.group(1)}"
 
 
-def _build_address(record: dict) -> str | None:
-    parts = [record.get(field, "") for field in ADDRESS_FIELDS]
-    parts = [p.strip() for p in parts if p and p.strip()]
-    return ", ".join(parts) if parts else None
-
-
 def main():
     print("Resolving current Companies House bulk snapshot URL...")
     try:
@@ -69,34 +70,71 @@ def main():
         sys.exit(1)
 
     try:
+        print("Extracting CSV to disk (not into memory)...")
         with zipfile.ZipFile(ZIP_LOCAL_PATH) as z:
-            csv_bytes = z.read(z.namelist()[0])
-        df = pl.read_csv(io.BytesIO(csv_bytes), infer_schema_length=0)
-        df.columns = [c.strip() for c in df.columns]
+            member = z.namelist()[0]
+            with z.open(member) as src, open(CSV_LOCAL_PATH, "wb") as dst:
+                for chunk in iter(lambda: src.read(8 * 1024 * 1024), b""):
+                    dst.write(chunk)
     except Exception as e:
-        print(f"FATAL: failed to parse Companies House bulk snapshot: {e}", file=sys.stderr)
+        print(f"FATAL: failed to extract Companies House bulk snapshot: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
         if os.path.exists(ZIP_LOCAL_PATH):
             os.remove(ZIP_LOCAL_PATH)
 
-    rows = []
-    for record in df.iter_rows(named=True):
-        rows.append({
-            "company_name": (record.get("CompanyName") or "").strip() or None,
-            "registration_number": (record.get("CompanyNumber") or "").strip() or None,
-            "registered_address": _build_address(record),
-            "status": (record.get("CompanyStatus") or "").strip() or None,
-            "ubo_names": None,  # PSC/UBO data is a separate Companies House product, not in this snapshot
-            "jurisdiction": "GB",
-        })
+    try:
+        print("Parsing CSV with Polars (streaming, low-memory)...")
+        lf = pl.scan_csv(CSV_LOCAL_PATH, infer_schema_length=0, low_memory=True)
+        lf = lf.rename({c: c.strip() for c in lf.collect_schema().names()})
 
-    if not rows:
-        print("FATAL: parsed zero rows from Companies House bulk snapshot — refusing to write an empty file", file=sys.stderr)
+        def _blank_to_null(col: str) -> pl.Expr:
+            stripped = pl.col(col).str.strip_chars()
+            return pl.when(stripped == "").then(None).otherwise(stripped)
+
+        address_expr = pl.concat_str(
+            [_blank_to_null(f) for f in ADDRESS_FIELDS],
+            separator=", ",
+            ignore_nulls=True,
+        )
+
+        out = lf.select(
+            pl.col("CompanyName").str.strip_chars().alias("company_name"),
+            pl.col("CompanyNumber").str.strip_chars().alias("registration_number"),
+            address_expr.alias("registered_address"),
+            pl.col("CompanyStatus").str.strip_chars().alias("status"),
+            pl.lit(None, dtype=pl.Utf8).alias("ubo_names"),
+            pl.lit("GB").alias("jurisdiction"),
+            pl.lit(zip_url).alias("source_url"),
+            pl.lit(datetime.now(timezone.utc).isoformat()).alias("fetched_at"),
+            pl.lit(PIPELINE_VERSION).alias("pipeline_version"),
+        ).with_columns(
+            pl.when(pl.col("registered_address") == "").then(None).otherwise(pl.col("registered_address")).alias("registered_address")
+        )
+
+        row_count = out.select(pl.len()).collect().item()
+        if row_count == 0:
+            print("FATAL: parsed zero rows from Companies House bulk snapshot — refusing to write an empty file", file=sys.stderr)
+            sys.exit(1)
+
+        sentinel_expr = pl.lit(False)
+        for col in ("company_name", "registration_number", "status"):
+            for sentinel in KNOWN_FAKE_SENTINELS:
+                sentinel_expr = sentinel_expr | pl.col(col).str.contains(re.escape(sentinel), literal=False)
+        fake_hits = out.filter(sentinel_expr).select(pl.len()).collect().item()
+        if fake_hits > 0:
+            print(f"FATAL: {fake_hits} row(s) matched a banned fake-data sentinel — refusing to ship", file=sys.stderr)
+            sys.exit(1)
+
+        out.sink_parquet(OUTPUT_PATH)
+    except Exception as e:
+        print(f"FATAL: failed to parse Companies House bulk snapshot: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        if os.path.exists(CSV_LOCAL_PATH):
+            os.remove(CSV_LOCAL_PATH)
 
-    count = write_registry_parquet(rows, "uk_companies_house.parquet", source_url=zip_url)
-    print(f"Wrote {count} real UK Companies House rows to uk_companies_house.parquet")
+    print(f"Wrote {row_count} real UK Companies House rows to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
