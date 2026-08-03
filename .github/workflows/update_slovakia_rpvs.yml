@@ -1,0 +1,40 @@
+name: Update Slovakia RPVS Registry Data
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Runs every Monday at 6:00 AM UTC (RPVS is a live register, not a dated bulk file — weekly full crawl of ~2,500 pages is a considerate cadence)
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_slovakia_rpvs.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output slovakia_rpvs.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp slovakia_rpvs.parquet s3://diliguard-sanctions-test/slovakia_rpvs.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

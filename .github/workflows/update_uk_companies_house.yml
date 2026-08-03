@@ -1,0 +1,40 @@
+name: Update UK Companies House Registry Data
+
+on:
+  schedule:
+    - cron: "0 7 7 * *" # Runs on the 7th of every month at 7:00 AM UTC (Companies House publishes within 5 working days of month-end)
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_uk_companies_house.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output uk_companies_house.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp uk_companies_house.parquet s3://diliguard-sanctions-test/uk_companies_house.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
