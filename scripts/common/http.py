@@ -28,10 +28,27 @@ def get_with_retry(url: str, *, timeout: int = DEFAULT_TIMEOUT, max_attempts: in
     raise last_exc
 
 
-def download_file(url: str, local_path: str, *, timeout: int = 120, max_attempts: int = 3) -> None:
-    """Stream a URL to disk, retrying on transient failures."""
+def download_file(url: str, local_path: str, *, timeout: int = 120, max_attempts: int = 3,
+                   progress_every_bytes: int = 25 * 1024 * 1024) -> None:
+    """Stream a URL to disk, retrying on transient failures.
+
+    Logs progress periodically so a large download doesn't look "stuck" — silent
+    long-running steps are what invite an accidental manual cancel, and progress
+    output also tells us exactly how far a run got if it does die.
+    """
     response = get_with_retry(url, timeout=timeout, max_attempts=max_attempts, stream=True)
+    total = response.headers.get("Content-Length")
+    total_mb = f"{int(total) / 1024 / 1024:.1f}MB" if total else "unknown size"
+    print(f"Starting download ({total_mb})...", flush=True)
+
+    downloaded = 0
+    next_report_at = progress_every_bytes
     with open(local_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192 * 1024):
             if chunk:
                 f.write(chunk)
+                downloaded += len(chunk)
+                if downloaded >= next_report_at:
+                    print(f"...downloaded {downloaded / 1024 / 1024:.1f}MB / {total_mb}", flush=True)
+                    next_report_at += progress_every_bytes
+    print(f"Download complete: {downloaded / 1024 / 1024:.1f}MB", flush=True)
