@@ -1,0 +1,43 @@
+name: Update Slovenia Registry Data
+
+on:
+  schedule:
+    # AJPES/podatki.gov.si refreshes the Poslovni register Slovenije dataset
+    # "dvotedensko" (biweekly) — run on the 1st and 15th of every month, well after
+    # the source's own publish window, rather than polling daily for no reason.
+    - cron: "0 5 1,15 * *"
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_slovenia.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output slovenia_reg.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp slovenia_reg.parquet s3://diliguard-sanctions-test/slovenia_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

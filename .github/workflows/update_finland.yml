@@ -1,0 +1,46 @@
+name: Update Finland PRH/YTJ Registry Data
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # Daily at 5:00 AM UTC — PRH's open data API (avoindata.prh.fi) is a
+    # live queryable register, not a dated bulk file, and company registrations/status
+    # changes happen continuously; a full ~8,200-page crawl at ~1-2s/page takes a few
+    # hours, so a daily cadence keeps data fresh without hammering the API more than
+    # once a day (compare: Slovakia RPVS, a similarly live register, runs weekly at a
+    # much smaller ~2,500-page scale — Finland's register is ~15x larger, so daily
+    # rather than more-frequent is the considerate choice here).
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_finland.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output finland_reg.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp finland_reg.parquet s3://diliguard-sanctions-test/finland_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

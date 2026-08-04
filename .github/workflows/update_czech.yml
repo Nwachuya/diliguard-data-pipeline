@@ -1,0 +1,44 @@
+name: Update Czech ARES Registry Data
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Weekly, Monday 6:00 AM UTC — ARES is a live queryable register
+                          # (not a dated bulk file), and a full recursive prefix-trie crawl
+                          # over ~3M entities is a considerable number of requests; weekly
+                          # keeps our copy reasonably fresh without hammering a free public
+                          # API more often than the data realistically changes.
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_czech.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output czech_reg.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp czech_reg.parquet s3://diliguard-sanctions-test/czech_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

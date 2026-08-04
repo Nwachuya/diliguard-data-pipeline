@@ -1,0 +1,40 @@
+name: Update Lithuania JAR Registry Data
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Runs every Monday at 6:00 AM UTC (JAR is a live register of ~539k legal entities, not a dated bulk file — like Slovakia RPVS, a weekly full crawl is a considerate cadence given the paginated Spinta API)
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_lithuania.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output lithuania_reg.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp lithuania_reg.parquet s3://diliguard-sanctions-test/lithuania_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
