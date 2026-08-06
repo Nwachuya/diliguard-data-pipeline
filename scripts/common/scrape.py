@@ -50,6 +50,14 @@ def get_with_retry(url: str, *, timeout: int = DEFAULT_TIMEOUT, max_attempts: in
     function (rather than importing that one) so scrape-specific concerns —
     session/cookie reuse across a paginated crawl, an HTML-flavoured default
     Accept header — can evolve independently of the bulk-file/API helper.
+
+    Also retries on HTTP 429 (confirmed live against Bulgaria's Commercial
+    Register search endpoint, which enforces a real, undocumented short-burst
+    rate limit with no `Retry-After` header — a handful of rapid requests is
+    enough to trigger it, and it clears within roughly a minute or two). When a
+    `Retry-After` header IS present, it's honoured; otherwise this backs off
+    with a longer, growing delay than the 5xx case, since 429 recovery in
+    practice takes longer than a transient 5xx blip.
     """
     getter = session.get if session is not None else requests.get
     last_exc = None
@@ -57,6 +65,11 @@ def get_with_retry(url: str, *, timeout: int = DEFAULT_TIMEOUT, max_attempts: in
         try:
             headers = {"Accept": "text/html,application/xhtml+xml", **DEFAULT_HEADERS, **kwargs.pop("headers", {})}
             response = getter(url, timeout=timeout, headers=headers, **kwargs)
+            if response.status_code == 429 and attempt < max_attempts:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff_seconds * attempt * 5
+                time.sleep(delay)
+                continue
             if response.status_code >= 500 and attempt < max_attempts:
                 time.sleep(backoff_seconds * attempt)
                 continue

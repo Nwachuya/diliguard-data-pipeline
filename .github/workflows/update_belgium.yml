@@ -1,0 +1,50 @@
+name: Update Belgium Registry Data
+
+# BLOCKED: this workflow will fail every run until a free KBO Open Data account
+# exists (https://kbopub.economie.fgov.be/kbo-open-data/signup?form) and its
+# credentials are stored as the KBO_USERNAME / KBO_PASSWORD repo secrets referenced
+# below. Do not remove this comment until that account exists and a real run has
+# been verified to succeed.
+
+on:
+  schedule:
+    # KBO/CBE Open Data generates a fresh full export daily (kept available for 31
+    # days) — run once a day.
+    - cron: "0 7 * * *"
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+          KBO_USERNAME: ${{ secrets.KBO_USERNAME }}
+          KBO_PASSWORD: ${{ secrets.KBO_PASSWORD }}
+        run: |
+          python -u scripts/update_belgium.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output belgium_reg.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp belgium_reg.parquet s3://diliguard-sanctions-test/belgium_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

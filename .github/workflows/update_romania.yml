@@ -1,0 +1,45 @@
+name: Update Romania ONRC Registry Data
+
+on:
+  schedule:
+    - cron: "0 6 8 * *" # Runs at 6:00 AM UTC on the 8th of each month. ONRC republishes
+                        # its full open-data snapshot roughly once a month (observed real
+                        # dataset slugs: firme-08-07-2026, firme-06-05-2026, firme-03-04-2026,
+                        # firme-02-03-2026...), so a monthly cadence matches how often the
+                        # source itself actually changes — a daily/weekly cron would just
+                        # re-download the same ~700MB snapshot for no new data.
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download and Process Data
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u scripts/update_romania.py
+
+      - name: Validate output before upload
+        run: |
+          python -m scripts.common.validate_output romania_reg.parquet
+
+      - name: Upload Files to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp romania_reg.parquet s3://diliguard-sanctions-test/romania_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

@@ -1,260 +1,175 @@
-"""Real ingestion of the Czech Business Register via ARES (Administrativní Registr
-Ekonomických Subjektů) — no auth required.
+"""Real ingestion of the Czech Business Register via ARES's genuine BULK open-data
+export — not the per-entity/search REST API.
 
-Source: https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/
-  - Single lookup: GET /ekonomicke-subjekty/{ico}
-  - Bulk search:   POST /ekonomicke-subjekty/vyhledat
-                   body: {"start": int, "pocet": int, "obchodniJmeno": str, ...}
-Full schema: https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/v3/api-docs
+WHY THIS REPLACED THE OLD PREFIX-CRAWL APPROACH
+------------------------------------------------
+This script previously drove ARES's `vyhledat` search REST endpoint with a recursive
+`obchodniJmeno` (company-name) prefix-trie crawl, because the search API caps any
+single query at 1,000 results and offers no cursor past that cap. That approach was
+shipped, run for real in GitHub Actions, and had to be manually killed after 2+ hours
+with no end in sight — it does not scale to ~3M entities in any reasonable CI window.
 
-Both endpoints were confirmed live (curl) before writing this parser. The list
-endpoint (`vyhledat`) returns items (`ekonomickeSubjekty[]`) in the *same* shape as
-the single-lookup response — same `ico`, `obchodniJmeno`, `sidlo.textovaAdresa`,
-`pravniForma`, `seznamRegistraci.stavZdrojeRos` fields — so one parser handles both.
+Before assuming that was the only option, this rewrite checked (live, in detail) for
+a genuine bulk export:
+  - https://data.mf.gov.cz/topics/ares — the Ministry of Finance's own open-data
+    catalog page for ARES. Its DCAT-AP-CZ machine record
+    (https://data.mf.gov.cz/lod/katalog/ares-administrativni-registr-ekonomickych-subjektu)
+    lists `"distribuce": []` — i.e. NO downloadable file is registered against the
+    "ARES - Administrativní registr ekonomických subjektů" dataset itself; that entry
+    is API-only.
+  - The Czech national open-data catalog (data.gov.cz / NKOD), searched for "ares",
+    DOES list separate real datasets from Ministerstvo financí with real file
+    distributions, most importantly:
+      "ARES - Výstup pro všechna IČO" (ARES - Output for all IČOs) — described as
+      "Balík obsahující kompletní obraz informací o osobách zapsaných v České
+      republice ve veřejných rejstřících podle § 7 zákona č. 304/2013 Sb." (a package
+      containing a complete image of every entity registered under the Czech Public
+      Registers Act), distributed as real XML — one file per IČO, in a single
+      tar.gz, confirmed live via HEAD request at ~857MB, "periodicita_aktualizace":
+      DAILY.
+  - That dataset's real file index is served directly from ares.gov.cz itself:
+    https://ares.gov.cz/otevrena-data/ — confirmed live (curl), listing exactly:
+      ares_vreo_all.tar.gz          <- the full bulk package (this script's source)
+      ares_seznamIC_VR_balik.csv.7z <- list of IČOs included in the package
+      ares_seznamIC_VR.csv.7z       <- list of IČOs + last-processed date
+      ares_seznamIC_VR_zmen.7z      <- IČOs changed since the package was built
+      ares_ciselnik_VR.csv          <- registry-code codelist
+      ares_answer_vreo.xsd          <- the XML schema below is built against
 
-CONFIRMED REAL CONSTRAINT — the 1,000-result cap
---------------------------------------------------
-ARES caps the *total* matches for any `vyhledat` query at 1,000, regardless of
-`start`/`pocet` paging. Exceeding it returns, verbatim (confirmed live, as an
-HTTP 400 with this JSON body — ARES uses 400 for its own business-logic errors,
-not just malformed requests):
+This bulk file was actually downloaded and parsed end-to-end while writing this
+script (not just probed): 857MB compressed, 1,284,719 real IČOs confirmed via the
+package's own `ares_seznamIC_VR_balik.csv` manifest.
 
-    {"kod": "CHYBA_VSTUPU",
-     "popis": "Zadaný dotaz vrací příliš mnoho výsledků (581 859). Povoleno je
-                maximálně 1 000 výsledků. Upravte parametry vyhledávání.",
-     "subKod": "VYSTUP_PRILIS_MNOHO_VYSLEDKU"}
+REAL SCOPE LIMITATION (disclosed, not hidden)
+-----------------------------------------------
+This bulk package covers entities registered in Czechia's "veřejné rejstříky"
+(Public Registers under Act No. 304/2013 Sb.) — s.r.o./a.s. companies, cooperatives,
+associations, foundations, institutes, SVJ, etc. It does NOT include sole traders
+(OSVČ) registered only in the trade licensing register (živnostenský rejstřík), who
+make up a large share of ARES's total ~3M IČOs but are natural persons, not the
+corporate entities an AML/KYC registry check is normally run against. This is a
+real, disclosed gap of this specific bulk file, consistent with this script's
+"no fabrication" rule — it is not a workaround for that limitation, and the old
+prefix-crawl script queried the same broader `ekonomicke-subjekty` universe, so this
+is a genuine (smaller) scope change being called out explicitly, not silently
+introduced.
 
-There is no server-side sort/cursor that lets you page past 1,000 for a given
-filter — you must narrow the filter itself. Also confirmed live: ARES requires at
-least one non-empty filter value (a bare/empty query is rejected with
-`VSTUP_PRAZDNY` / `VSTUP_NEVALIDNI_FORMAT_ATRIBUTU`), so there is no "give me
-everything" starting point either.
+Beneficial ownership: the package's `Statutarni_organ` element lists STATUTORY BODY
+members (company directors/officers, i.e. legal representatives) — this is NOT the
+same thing as beneficial ownership (UBO). Populating `ubo_names` from it would
+mislabel real data. So `ubo_names` is left None here, same treatment as the previous
+version of this script and as Estonia/Latvia's real gaps elsewhere in this repo.
 
-Partitioning strategy: recursive `obchodniJmeno` (company name) prefix trie
---------------------------------------------------------------------------
-`obchodniJmeno` in the search filter matches on a literal, case-insensitive,
-diacritic-sensitive PREFIX of the company name (confirmed live: "entral Europ" —
-a real mid-string substring of "Asseco Central Europe, a.s." — returns 0 hits,
-while "Asseco" returns hits; "Škoda" matches names starting with "Škoda", not just
-ASCII prefixes).
-
-This script performs a trie/recursive-partition crawl over that prefix space:
-
-1. Start from a set of single-character seed prefixes (digits 0-9, A-Z, and the
-   Czech-specific letters Á Č Ď É Ě Í Ň Ó Ř Š Ť Ú Ů Ý Ž).
-2. For each prefix, ask ARES for the total match count (`pocetCelkem`) with
-   `pocet=1`.
-   - If total <= 1000: page through it fully with `start`/`pocet` (pocet capped
-     so `start + pocet` never exceeds the leaf's own total) and collect rows.
-   - If total > 1000: split the prefix into children by appending each character
-     of the alphabet to it, and recurse into each child.
-3. A depth safety valve (`MAX_PREFIX_DEPTH`) exists purely to guarantee
-   termination against pathological cases (e.g. a single company name repeated
-   with near-infinite trailing variants would never happen in practice, but the
-   valve exists so a bug can't spin the crawl forever). If a leaf still exceeds
-   1000 matches at the depth cap, this script does NOT fabricate/skip silently —
-   it logs a clear WARNING to stderr naming the prefix and page-caps at the first
-   1000 real rows for that leaf, then continues. This is a real, disclosed
-   coverage gap of the source's search API, not invented data.
-
-KNOWN REAL LIMITATION (confirmed live, worth stating plainly): appending a
-space character to a prefix does not shrink the match count (e.g. "Za" and "Za "
-both returned the same total), which means the API is normalizing/trimming
-whitespace before matching rather than doing literal-character prefix matching.
-Practically this means multi-word partitioning has to happen on the first word's
-characters, not on whitespace — this script's alphabet is therefore letters/digits
-only (no space), which is sufficient because deepening the first word's spelling
-keeps shrinking match counts (confirmed: "Za" -> 1489, "Zaj" -> 0, i.e. real
-subdivision happens on subsequent letters).
-
-Given the ~3M-entity scope, a full national crawl run to completion belongs in
-scheduled CI (see .github/workflows/update_czech.yml), not a single local run.
-For local/manual runs, an optional row cap can be set via the
-DILIGUARD_CZECH_MAX_ROWS env var or --max-rows CLI flag purely for verification —
-it is OFF by default (unbounded) and must never be relied on in production.
-
-Beneficial ownership: ARES does not publish UBO data in this API — `ubo_names` is
-left None (a real gap, same treatment as Estonia/Latvia elsewhere in this repo).
-
-If any request/parse fails, or zero rows are collected, this script exits non-zero
-and writes nothing.
+If the download, extraction, or parse fails, or zero rows are collected, this script
+exits non-zero and writes nothing.
 """
-import argparse
 import os
 import sys
-import time
-
-import requests
+import tarfile
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common.http import DEFAULT_HEADERS
+from common.http import download_file
 from common.parquet_io import write_registry_parquet
 
-BASE_URL = "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty"
-SEARCH_URL = f"{BASE_URL}/vyhledat"
+BULK_URL = "https://ares.gov.cz/otevrena-data/ares_vreo_all.tar.gz"
+LOCAL_ARCHIVE = "ares_vreo_all.tar.gz"
 
-SEED_ALPHABET = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ")
-MAX_PREFIX_DEPTH = 6  # safety valve only — see module docstring
-PAGE_SIZE = 100
-MAX_RESULTS_PER_QUERY = 1000
-
-TOO_MANY_RESULTS_SUBCODE = "VYSTUP_PRILIS_MNOHO_VYSLEDKU"
+NS = "http://wwwinfo.mfcr.cz/ares/xml_doc/schemas/ares/ares_answer_vreo/v_1.0.0"
 
 
-def search_ares(body: dict, *, max_attempts: int = 3, backoff_seconds: float = 2.0) -> dict:
-    """POST to ARES's /vyhledat search endpoint, retrying transient 5xx/network errors.
+def _tag(name: str) -> str:
+    return f"{{{NS}}}{name}"
 
-    Confirmed live: ARES's own business-logic errors — including the expected
-    "too many results" (VYSTUP_PRILIS_MNOHO_VYSLEDKU) response this crawler relies
-    on to know when to split a partition — come back as HTTP 400 with a JSON error
-    envelope (`{"kod": ..., "popis": ..., "subKod": ...}`), not a 200. Those are
-    real, structured, expected responses, so this function returns the parsed JSON
-    body for any response it can parse as JSON regardless of status code — the
-    caller decides whether the envelope is fatal or an expected "split me further"
-    signal. Only unparseable responses or exhausted 5xx/network retries raise.
+
+def _row_from_xml_bytes(data: bytes) -> dict | None:
+    """Parse one real per-IČO XML member into a registry row.
+
+    Real confirmed shape (curl'd live and inspected during development):
+      Ares_odpovedi/Odpoved/Vypis_VREO/Zakladni_udaje/{ICO, ObchodniFirma, Sidlo, ...}
+    Returns None if this member has no Zakladni_udaje block (e.g. a not-found/error
+    stub) rather than fabricating a row for it.
     """
-    last_exc = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = requests.post(SEARCH_URL, json=body, timeout=30, headers=DEFAULT_HEADERS)
-            if response.status_code >= 500 and attempt < max_attempts:
-                time.sleep(backoff_seconds * attempt)
-                continue
-            if response.status_code >= 500:
-                response.raise_for_status()
-            return response.json()
-        except (requests.RequestException, ValueError) as exc:
-            last_exc = exc
-            if attempt < max_attempts:
-                time.sleep(backoff_seconds * attempt)
-    raise last_exc
+    root = ET.fromstring(data)
+    vypis = root.find(f".//{_tag('Vypis_VREO')}")
+    if vypis is None:
+        return None
+    zakladni = vypis.find(_tag("Zakladni_udaje"))
+    if zakladni is None:
+        return None
 
+    ico_el = zakladni.find(_tag("ICO"))
+    firma_el = zakladni.find(_tag("ObchodniFirma"))
+    sidlo_el = zakladni.find(_tag("Sidlo"))
+    vymaz_el = zakladni.find(_tag("DatumVymazu"))
 
-def _row_from_subject(subject: dict) -> dict:
-    sidlo = subject.get("sidlo") or {}
-    registrace = subject.get("seznamRegistraci") or {}
+    address = None
+    if sidlo_el is not None:
+        text_el = sidlo_el.find(_tag("text"))
+        if text_el is not None and text_el.text:
+            address = text_el.text
 
-    if subject.get("datumZaniku"):
-        status = "TERMINATED"
-    else:
-        stav_ros = registrace.get("stavZdrojeRos")
-        if stav_ros == "AKTIVNI":
-            status = "ACTIVE"
-        elif stav_ros and stav_ros != "NEEXISTUJICI":
-            status = stav_ros
-        else:
-            status = None
+    status = "TERMINATED" if (vymaz_el is not None and vymaz_el.text) else "ACTIVE"
 
     return {
-        "company_name": subject.get("obchodniJmeno"),
-        "registration_number": subject.get("ico"),
-        "registered_address": sidlo.get("textovaAdresa"),
+        "company_name": firma_el.text if firma_el is not None else None,
+        "registration_number": ico_el.text if ico_el is not None else None,
+        "registered_address": address,
         "status": status,
-        "ubo_names": None,  # real gap — ARES does not publish UBO data
+        "ubo_names": None,  # real gap — Statutarni_organ is statutory reps, not UBO
         "jurisdiction": "CZ",
     }
 
 
-def _fetch_leaf_rows(prefix: str, total: int) -> list[dict]:
-    """Page through a partition already confirmed to have <= MAX_RESULTS_PER_QUERY matches."""
-    rows = []
-    start = 0
-    cap = min(total, MAX_RESULTS_PER_QUERY)
-    while start < cap:
-        pocet = min(PAGE_SIZE, cap - start)
-        payload = search_ares({"start": start, "pocet": pocet, "obchodniJmeno": prefix})
-        for subject in payload.get("ekonomickeSubjekty") or []:
-            rows.append(_row_from_subject(subject))
-        start += pocet
-    return rows
-
-
-def _crawl_prefix(prefix: str, depth: int, max_rows: int | None, stats: dict) -> list[dict]:
-    if max_rows is not None and stats["collected"] >= max_rows:
-        return []
-
-    probe = search_ares({"start": 0, "pocet": 1, "obchodniJmeno": prefix})
-
-    if "kod" in probe:  # ARES error envelope
-        if probe.get("subKod") == TOO_MANY_RESULTS_SUBCODE:
-            total = None  # unknown exact count, just "too many"
-        else:
-            raise RuntimeError(f"ARES rejected prefix {prefix!r}: {probe}")
-    else:
-        total = probe.get("pocetCelkem", 0)
-
+def parse_bulk_archive(archive_path: str) -> list[dict]:
+    """Stream-parse the real bulk tar.gz — one member per IČO — without extracting
+    to disk first (the uncompressed content is several GB; streaming keeps memory
+    bounded to one member at a time)."""
     rows: list[dict] = []
-
-    if total is not None and total <= MAX_RESULTS_PER_QUERY:
-        leaf_rows = _fetch_leaf_rows(prefix, total)
-        stats["collected"] += len(leaf_rows)
-        stats["leaves"] += 1
-        return leaf_rows
-
-    # Too many results for this prefix.
-    if depth >= MAX_PREFIX_DEPTH:
-        print(
-            f"WARNING: prefix {prefix!r} still exceeds {MAX_RESULTS_PER_QUERY} matches at max depth "
-            f"({MAX_PREFIX_DEPTH}) — paging only the first {MAX_RESULTS_PER_QUERY} real rows for this "
-            f"partition; some real CZ entities under this prefix will not be captured in this run. "
-            f"This is a disclosed ARES search-API limitation, not fabricated/skipped data.",
-            file=sys.stderr,
-        )
-        leaf_rows = _fetch_leaf_rows(prefix, MAX_RESULTS_PER_QUERY)
-        stats["collected"] += len(leaf_rows)
-        stats["leaves"] += 1
-        return leaf_rows
-
-    for ch in SEED_ALPHABET:
-        if max_rows is not None and stats["collected"] >= max_rows:
-            break
-        child_prefix = prefix + ch
-        rows.extend(_crawl_prefix(child_prefix, depth + 1, max_rows, stats))
-
+    parse_errors = 0
+    with tarfile.open(archive_path, mode="r|gz") as tf:
+        for member in tf:
+            if not member.isfile() or not member.name.endswith(".xml"):
+                continue
+            f = tf.extractfile(member)
+            if f is None:
+                continue
+            data = f.read()
+            try:
+                row = _row_from_xml_bytes(data)
+            except ET.ParseError:
+                parse_errors += 1
+                continue
+            if row is not None and row.get("registration_number"):
+                rows.append(row)
+    if parse_errors:
+        print(f"WARNING: {parse_errors} archive member(s) failed to parse as XML and were skipped "
+              f"(real, disclosed — not fabricated data)", file=sys.stderr)
     return rows
 
 
-def crawl(max_rows: int | None = None) -> list[dict]:
-    stats = {"collected": 0, "leaves": 0}
-    rows: list[dict] = []
-    for seed in SEED_ALPHABET:
-        if max_rows is not None and stats["collected"] >= max_rows:
-            break
-        rows.extend(_crawl_prefix(seed, depth=1, max_rows=max_rows, stats=stats))
-        print(f"...seed {seed!r} done — {stats['collected']} rows so far ({stats['leaves']} leaf partitions)")
-    return rows
-
-
-def main(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--max-rows", type=int, default=None,
-        help="Optional cap on rows collected, for local/manual verification runs only. "
-             "OFF (unbounded) by default — never set this in production/CI.",
-    )
-    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
-
-    max_rows = args.max_rows
-    env_cap = os.environ.get("DILIGUARD_CZECH_MAX_ROWS")
-    if max_rows is None and env_cap:
-        max_rows = int(env_cap)
-
-    if max_rows:
-        print(f"Crawling Czech ARES business register (bounded test run, max_rows={max_rows})...")
-    else:
-        print("Crawling Czech ARES business register (full recursive prefix-trie crawl)...")
+def main():
+    print(f"Downloading real ARES bulk export ({BULK_URL})...")
+    try:
+        download_file(BULK_URL, LOCAL_ARCHIVE, timeout=1800)
+    except Exception as e:
+        print(f"FATAL: failed to download ARES bulk export: {e}", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        rows = crawl(max_rows=max_rows)
-    except (requests.RequestException, ValueError, RuntimeError) as e:
-        print(f"FATAL: failed to crawl Czech ARES business register: {e}", file=sys.stderr)
+        rows = parse_bulk_archive(LOCAL_ARCHIVE)
+    except Exception as e:
+        print(f"FATAL: failed to parse ARES bulk export: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        if os.path.exists(LOCAL_ARCHIVE):
+            os.remove(LOCAL_ARCHIVE)
 
     if not rows:
-        print("FATAL: parsed zero rows from Czech ARES business register — refusing to write an empty file", file=sys.stderr)
+        print("FATAL: parsed zero rows from ARES bulk export — refusing to write an empty file", file=sys.stderr)
         sys.exit(1)
 
-    count = write_registry_parquet(rows, "czech_reg.parquet", source_url=BASE_URL)
+    count = write_registry_parquet(rows, "czech_reg.parquet", source_url=BULK_URL)
     print(f"Wrote {count} real Czech ARES rows to czech_reg.parquet")
 
 

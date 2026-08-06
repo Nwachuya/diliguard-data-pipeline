@@ -1,6 +1,15 @@
-"""Fixture-based test of the real Czech ARES parsing/partitioning logic (no network)."""
+"""Fixture-based test of the real Czech ARES bulk-export parsing logic (no network).
+
+The fixture XML member bodies below are trimmed real shapes confirmed live by
+downloading and inspecting actual members of https://ares.gov.cz/otevrena-data/
+ares_vreo_all.tar.gz during development of scripts/update_czech.py (e.g. IČO
+00000108 "Závodní klub OS KOVO Buzuluk Komárov" and IČO 00000124 "INSTITUT
+ŘÍZENÍ", the latter showing the real DatumVymazu-present/TERMINATED shape).
+"""
 import importlib
+import io
 import sys
+import tarfile
 from pathlib import Path
 
 import polars as pl
@@ -9,48 +18,37 @@ import pytest
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-# Real single-lookup/list-item shape confirmed live via curl against
-# https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/{ico} and
-# .../vyhledat (list items have the identical shape).
-ACTIVE_SUBJECT = {
-    "ico": "27074358",
-    "obchodniJmeno": "Asseco Central Europe, a.s.",
-    "sidlo": {
-        "kodStatu": "CZ",
-        "textovaAdresa": "Budějovická 778/3a, Michle, 14000 Praha 4",
-    },
-    "pravniForma": "121",
-    "pravniFormaRos": "121",
-    "datumVzniku": "2003-08-06",
-    "seznamRegistraci": {
-        "stavZdrojeRos": "AKTIVNI",
-        "stavZdrojeVr": "AKTIVNI",
-        "stavZdrojeRzp": "AKTIVNI",
-        "stavZdrojeNrpzs": "NEEXISTUJICI",
-    },
-}
-TERMINATED_SUBJECT = {
-    "ico": "11111111",
-    "obchodniJmeno": "TEST FIXTURE ZANIKLA a.s.",
-    "sidlo": {"kodStatu": "CZ", "textovaAdresa": "Testovací 1, 10000 Praha"},
-    "pravniForma": "121",
-    "datumVzniku": "1998-01-01",
-    "datumZaniku": "2020-01-01",
-    "seznamRegistraci": {"stavZdrojeRos": "ZANIKLY"},
-}
-NO_STATUS_SUBJECT = {
-    "ico": "22222222",
-    "obchodniJmeno": "TEST FIXTURE NO STATUS s.r.o.",
-    "sidlo": {"kodStatu": "CZ", "textovaAdresa": None},
-    "pravniForma": "112",
-    "seznamRegistraci": {},
-}
+NS = "http://wwwinfo.mfcr.cz/ares/xml_doc/schemas/ares/ares_answer_vreo/v_1.0.0"
 
-TOO_MANY_RESULTS_ERROR = {
-    "kod": "CHYBA_VSTUPU",
-    "popis": "Zadaný dotaz vrací příliš mnoho výsledků (581 859). Povoleno je maximálně 1 000 výsledků.",
-    "subKod": "VYSTUP_PRILIS_MNOHO_VYSLEDKU",
-}
+
+def _member_xml(ico: str, firma: str, address: str, *, datum_vymazu: str | None = None) -> bytes:
+    vymaz = f"<are:DatumVymazu>{datum_vymazu}</are:DatumVymazu>" if datum_vymazu else ""
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<are:Ares_odpovedi xmlns:are="{NS}" odpoved_datum_cas="2026-04-23T11:11:57" '
+        'odpoved_pocet="1" odpoved_typ="Vypis_VREO" validation_XSLT="x" Id="aresds">'
+        "<are:Odpoved><are:Pomocne_ID>0</are:Pomocne_ID>"
+        "<are:Vysledek_hledani><are:Kod>1</are:Kod></are:Vysledek_hledani>"
+        "<are:Pocet_zaznamu>1</are:Pocet_zaznamu>"
+        "<are:Vypis_VREO><are:Uvod><are:Nadpis>Výpis</are:Nadpis></are:Uvod>"
+        "<are:Zakladni_udaje>"
+        "<are:Rejstrik>OR</are:Rejstrik>"
+        f"<are:ICO>{ico}</are:ICO>"
+        f"<are:ObchodniFirma>{firma}</are:ObchodniFirma>"
+        f"<are:Sidlo><are:text>{address}</are:text></are:Sidlo>"
+        "<are:DatumZapisu>1990-02-27</are:DatumZapisu>"
+        f"{vymaz}"
+        "</are:Zakladni_udaje></are:Vypis_VREO></are:Odpoved></are:Ares_odpovedi>"
+    )
+    return xml.encode("utf-8")
+
+
+def _build_fixture_archive(path: Path, members: dict[str, bytes]) -> None:
+    with tarfile.open(path, mode="w:gz") as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
 
 
 def _fresh_module():
@@ -59,69 +57,57 @@ def _fresh_module():
     return importlib.import_module("update_czech")
 
 
-def test_czech_partitioning_and_parsing(monkeypatch, tmp_path):
+def test_czech_bulk_archive_parsing_and_status(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     mod = _fresh_module()
 
-    # Simulate a tiny universe: prefix "A" has too many results and must be split
-    # into children; prefix "T" resolves directly to a small leaf; every other
-    # single-letter seed has zero matches.
-    def _fake_search(body, **kwargs):
-        prefix = body.get("obchodniJmeno", "")
-        start = body.get("start", 0)
+    archive = tmp_path / "fixture.tar.gz"
+    _build_fixture_archive(archive, {
+        "./VYSTUP/DATA/00000108.xml": _member_xml(
+            "00000108", "Závodní klub OS KOVO Buzuluk Komárov", "Buzulucká 440, 26762 Komárov",
+        ),
+        "./VYSTUP/DATA/00000124.xml": _member_xml(
+            "00000124", "INSTITUT ŘÍZENÍ", "Jungmannova 29, 11000 Praha 1, Česká republika",
+            datum_vymazu="1994-08-01",
+        ),
+    })
 
-        if prefix == "A":
-            return dict(TOO_MANY_RESULTS_ERROR)
-        if prefix == "AS":
-            # One further split needed.
-            return dict(TOO_MANY_RESULTS_ERROR)
-        if prefix == "ASS":
-            if start == 0:
-                return {"pocetCelkem": 1, "ekonomickeSubjekty": [ACTIVE_SUBJECT]}
-            return {"pocetCelkem": 1, "ekonomickeSubjekty": []}
-        if prefix == "T":
-            if start == 0:
-                return {"pocetCelkem": 2, "ekonomickeSubjekty": [TERMINATED_SUBJECT, NO_STATUS_SUBJECT]}
-            return {"pocetCelkem": 2, "ekonomickeSubjekty": []}
-        # Every other prefix (single letters/digits, and any other "A"-prefixed
-        # child besides "AS") has zero real matches in this fixture universe.
-        return {"pocetCelkem": 0, "ekonomickeSubjekty": []}
+    def _fake_download(url, local_path, **kwargs):
+        # Simulate the real download by copying our fixture archive into place.
+        local_path_obj = tmp_path / local_path if not str(local_path).startswith("/") else Path(local_path)
+        local_path_obj.write_bytes(archive.read_bytes())
 
-    monkeypatch.setattr(mod, "search_ares", _fake_search)
+    monkeypatch.setattr(mod, "download_file", _fake_download)
 
-    mod.main([])
+    mod.main()
 
     out = tmp_path / "czech_reg.parquet"
     assert out.exists()
     df = pl.read_parquet(out).sort("registration_number")
-    assert df.height == 3
+    assert df.height == 2
 
-    active = df.filter(pl.col("registration_number") == "27074358").row(0, named=True)
-    assert active["company_name"] == "Asseco Central Europe, a.s."
-    assert active["registered_address"] == "Budějovická 778/3a, Michle, 14000 Praha 4"
+    active = df.filter(pl.col("registration_number") == "00000108").row(0, named=True)
+    assert active["company_name"] == "Závodní klub OS KOVO Buzuluk Komárov"
+    assert active["registered_address"] == "Buzulucká 440, 26762 Komárov"
     assert active["status"] == "ACTIVE"
-    assert active["ubo_names"] is None
+    assert active["ubo_names"] is None  # real gap — Statutarni_organ is not UBO data
     assert active["jurisdiction"] == "CZ"
 
-    terminated = df.filter(pl.col("registration_number") == "11111111").row(0, named=True)
-    assert terminated["status"] == "TERMINATED"  # driven by datumZaniku, not just stavZdrojeRos
-
-    no_status = df.filter(pl.col("registration_number") == "22222222").row(0, named=True)
-    assert no_status["status"] is None  # no fabricated status when the source has none
-    assert no_status["registered_address"] is None
+    terminated = df.filter(pl.col("registration_number") == "00000124").row(0, named=True)
+    assert terminated["status"] == "TERMINATED"  # driven by real DatumVymazu presence
 
 
-def test_czech_exits_nonzero_on_request_failure(monkeypatch, tmp_path):
+def test_czech_exits_nonzero_on_download_failure(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     mod = _fresh_module()
 
-    def _boom(body, **kwargs):
-        raise mod.requests.RequestException("simulated failure")
+    def _boom(url, local_path, **kwargs):
+        raise RuntimeError("simulated network failure")
 
-    monkeypatch.setattr(mod, "search_ares", _boom)
+    monkeypatch.setattr(mod, "download_file", _boom)
 
     with pytest.raises(SystemExit) as exc_info:
-        mod.main([])
+        mod.main()
     assert exc_info.value.code == 1
     assert not (tmp_path / "czech_reg.parquet").exists()
 
@@ -130,12 +116,41 @@ def test_czech_exits_nonzero_on_zero_rows(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     mod = _fresh_module()
 
-    def _empty(body, **kwargs):
-        return {"pocetCelkem": 0, "ekonomickeSubjekty": []}
+    archive = tmp_path / "empty_fixture.tar.gz"
+    _build_fixture_archive(archive, {})
 
-    monkeypatch.setattr(mod, "search_ares", _empty)
+    def _fake_download(url, local_path, **kwargs):
+        local_path_obj = tmp_path / local_path if not str(local_path).startswith("/") else Path(local_path)
+        local_path_obj.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr(mod, "download_file", _fake_download)
 
     with pytest.raises(SystemExit) as exc_info:
-        mod.main([])
+        mod.main()
     assert exc_info.value.code == 1
     assert not (tmp_path / "czech_reg.parquet").exists()
+
+
+def test_czech_skips_unparseable_member_without_fabricating(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    mod = _fresh_module()
+
+    archive = tmp_path / "fixture_with_junk.tar.gz"
+    _build_fixture_archive(archive, {
+        "./VYSTUP/DATA/00000108.xml": _member_xml(
+            "00000108", "Závodní klub OS KOVO Buzuluk Komárov", "Buzulucká 440, 26762 Komárov",
+        ),
+        "./VYSTUP/DATA/broken.xml": b"<not well formed xml",
+    })
+
+    def _fake_download(url, local_path, **kwargs):
+        local_path_obj = tmp_path / local_path if not str(local_path).startswith("/") else Path(local_path)
+        local_path_obj.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr(mod, "download_file", _fake_download)
+
+    mod.main()
+
+    out = tmp_path / "czech_reg.parquet"
+    df = pl.read_parquet(out)
+    assert df.height == 1  # the one real, well-formed row — junk member skipped, not fabricated

@@ -9,10 +9,14 @@ This snapshot does not include Persons with Significant Control (PSC/UBO) data �
 that is a separate Companies House product/API — so `ubo_names` is left as None (a
 real gap), not fabricated.
 
-~5.7M rows / ~2GB decompressed CSV — this is done with Polars-native/lazy operations
-throughout (never a Python per-row loop building 5.7M dicts, and never the full CSV
-held in memory as a Python bytes object) after an earlier version OOM-killed the
-GitHub Actions runner immediately after a successful download.
+~5.7M rows / ~2GB decompressed CSV. The transform runs entirely inside DuckDB
+(CSV -> COPY TO PARQUET), the same approach already proven in CI by
+update_france_rne.py, because:
+  * an earlier version built a Python dict per row for all 5.7M rows and
+    OOM-killed the runner right after a successful download, and
+  * a Polars rewrite of it used APIs that only exist in Polars 1.x while CI pins
+    0.20.7 (the version the other, working country scripts depend on), so it
+    could not be verified locally without changing a pin that four live scripts rely on.
 
 If the download or parse fails, this script exits non-zero and writes nothing.
 """
@@ -22,7 +26,7 @@ import sys
 import zipfile
 from datetime import datetime, timezone
 
-import polars as pl
+import duckdb
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.http import download_file, get_with_retry
@@ -54,15 +58,36 @@ def _resolve_current_zip_url() -> str:
     return f"https://download.companieshouse.gov.uk/{match.group(1)}"
 
 
+def _resolve_columns(con, csv_path: str) -> dict:
+    """Map stripped column name -> the column name DuckDB actually exposes.
+
+    The Companies House header has inconsistent leading spaces (e.g. ' CompanyNumber',
+    ' RegAddress.AddressLine2'). Rather than assume whether the reader strips them,
+    ask DuckDB for the names it produced and match on the stripped form.
+    """
+    described = con.execute(
+        f"DESCRIBE SELECT * FROM read_csv_auto({_sql_str(csv_path)}, all_varchar=true, header=true)"
+    ).fetchall()
+    return {row[0].strip(): row[0] for row in described}
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _sql_str(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def main():
-    print("Resolving current Companies House bulk snapshot URL...")
+    print("Resolving current Companies House bulk snapshot URL...", flush=True)
     try:
         zip_url = _resolve_current_zip_url()
     except Exception as e:
         print(f"FATAL: failed to resolve Companies House bulk snapshot URL: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Downloading {zip_url} ...")
+    print(f"Downloading {zip_url} ...", flush=True)
     try:
         download_file(zip_url, ZIP_LOCAL_PATH, timeout=300)
     except Exception as e:
@@ -70,7 +95,7 @@ def main():
         sys.exit(1)
 
     try:
-        print("Extracting CSV to disk (not into memory)...")
+        print("Extracting CSV to disk (not into memory)...", flush=True)
         with zipfile.ZipFile(ZIP_LOCAL_PATH) as z:
             member = z.namelist()[0]
             with z.open(member) as src, open(CSV_LOCAL_PATH, "wb") as dst:
@@ -84,57 +109,67 @@ def main():
             os.remove(ZIP_LOCAL_PATH)
 
     try:
-        print("Parsing CSV with Polars (streaming, low-memory)...")
-        lf = pl.scan_csv(CSV_LOCAL_PATH, infer_schema_length=0, low_memory=True)
-        lf = lf.rename({c: c.strip() for c in lf.collect_schema().names()})
+        con = duckdb.connect()
+        con.execute("SET memory_limit='4GB';")
+        con.execute("SET temp_directory='tmp_duckdb_uk';")
 
-        def _blank_to_null(col: str) -> pl.Expr:
-            stripped = pl.col(col).str.strip_chars()
-            return pl.when(stripped == "").then(None).otherwise(stripped)
+        columns = _resolve_columns(con, CSV_LOCAL_PATH)
+        required = ["CompanyName", "CompanyNumber", "CompanyStatus", *ADDRESS_FIELDS]
+        missing = [c for c in required if c not in columns]
+        if missing:
+            raise RuntimeError(f"Companies House CSV is missing expected columns: {missing}")
 
-        address_expr = pl.concat_str(
-            [_blank_to_null(f) for f in ADDRESS_FIELDS],
-            separator=", ",
-            ignore_nulls=True,
-        )
+        def col(stripped_name: str) -> str:
+            return _quote_ident(columns[stripped_name])
 
-        out = lf.select(
-            pl.col("CompanyName").str.strip_chars().alias("company_name"),
-            pl.col("CompanyNumber").str.strip_chars().alias("registration_number"),
-            address_expr.alias("registered_address"),
-            pl.col("CompanyStatus").str.strip_chars().alias("status"),
-            pl.lit(None, dtype=pl.Utf8).alias("ubo_names"),
-            pl.lit("GB").alias("jurisdiction"),
-            pl.lit(zip_url).alias("source_url"),
-            pl.lit(datetime.now(timezone.utc).isoformat()).alias("fetched_at"),
-            pl.lit(PIPELINE_VERSION).alias("pipeline_version"),
-        ).with_columns(
-            pl.when(pl.col("registered_address") == "").then(None).otherwise(pl.col("registered_address")).alias("registered_address")
-        )
+        # nullif(trim(...), '') so blank fields become real NULLs — concat_ws then
+        # skips them instead of emitting empty ", ," gaps in the address.
+        address_parts = ", ".join(f"nullif(trim({col(f)}), '')" for f in ADDRESS_FIELDS)
+        fetched_at = datetime.now(timezone.utc).isoformat()
 
-        row_count = out.select(pl.len()).collect().item()
+        print("Converting CSV to Parquet with DuckDB (streaming)...", flush=True)
+        con.execute(f"""
+            COPY (
+                SELECT
+                    nullif(trim({col('CompanyName')}), '') AS company_name,
+                    nullif(trim({col('CompanyNumber')}), '') AS registration_number,
+                    nullif(concat_ws(', ', {address_parts}), '') AS registered_address,
+                    nullif(trim({col('CompanyStatus')}), '') AS status,
+                    CAST(NULL AS VARCHAR) AS ubo_names,
+                    'GB' AS jurisdiction,
+                    {_sql_str(zip_url)} AS source_url,
+                    {_sql_str(fetched_at)} AS fetched_at,
+                    {_sql_str(PIPELINE_VERSION)} AS pipeline_version
+                FROM read_csv_auto({_sql_str(CSV_LOCAL_PATH)}, all_varchar=true, header=true)
+            ) TO {_sql_str(OUTPUT_PATH)} (FORMAT PARQUET);
+        """)
+
+        row_count = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet({_sql_str(OUTPUT_PATH)})"
+        ).fetchone()[0]
         if row_count == 0:
-            print("FATAL: parsed zero rows from Companies House bulk snapshot — refusing to write an empty file", file=sys.stderr)
-            sys.exit(1)
+            raise RuntimeError("parsed zero rows — refusing to keep an empty file")
 
-        sentinel_expr = pl.lit(False)
-        for col in ("company_name", "registration_number", "status"):
-            for sentinel in KNOWN_FAKE_SENTINELS:
-                sentinel_expr = sentinel_expr | pl.col(col).str.contains(re.escape(sentinel), literal=False)
-        fake_hits = out.filter(sentinel_expr).select(pl.len()).collect().item()
+        sentinel_clause = " OR ".join(
+            f"{c} ILIKE {_sql_str('%' + s + '%')}"
+            for c in ("company_name", "registration_number", "status")
+            for s in KNOWN_FAKE_SENTINELS
+        )
+        fake_hits = con.execute(
+            f"SELECT COUNT(*) FROM read_parquet({_sql_str(OUTPUT_PATH)}) WHERE {sentinel_clause}"
+        ).fetchone()[0]
         if fake_hits > 0:
-            print(f"FATAL: {fake_hits} row(s) matched a banned fake-data sentinel — refusing to ship", file=sys.stderr)
-            sys.exit(1)
-
-        out.sink_parquet(OUTPUT_PATH)
+            raise RuntimeError(f"{fake_hits} row(s) matched a banned fake-data sentinel")
     except Exception as e:
         print(f"FATAL: failed to parse Companies House bulk snapshot: {e}", file=sys.stderr)
+        if os.path.exists(OUTPUT_PATH):
+            os.remove(OUTPUT_PATH)
         sys.exit(1)
     finally:
         if os.path.exists(CSV_LOCAL_PATH):
             os.remove(CSV_LOCAL_PATH)
 
-    print(f"Wrote {row_count} real UK Companies House rows to {OUTPUT_PATH}")
+    print(f"Wrote {row_count} real UK Companies House rows to {OUTPUT_PATH}", flush=True)
 
 
 if __name__ == "__main__":

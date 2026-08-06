@@ -2,11 +2,14 @@ name: Update Czech ARES Registry Data
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Weekly, Monday 6:00 AM UTC — ARES is a live queryable register
-                          # (not a dated bulk file), and a full recursive prefix-trie crawl
-                          # over ~3M entities is a considerable number of requests; weekly
-                          # keeps our copy reasonably fresh without hammering a free public
-                          # API more often than the data realistically changes.
+    - cron: "0 6 * * 1" # Weekly, Monday 6:00 AM UTC. NOTE: as of 2026-08, this script
+                          # downloads ARES's genuine bulk export (ares_vreo_all.tar.gz,
+                          # ~857MB, ~1.28M real entities), which the source itself
+                          # regenerates daily — so this schedule is a deliberate choice
+                          # to stay well under that cadence, not a limitation of the
+                          # source. Bump to daily if fresher data is ever needed; the
+                          # run itself is now a single bulk download + stream-parse
+                          # (minutes, not hours), so daily would be safe to run.
   workflow_dispatch: # Allows manual trigger
 
 jobs:

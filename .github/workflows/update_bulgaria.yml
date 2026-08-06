@@ -21,6 +21,23 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      # Bulgaria's real, confirmed short-burst rate limiting (HTTP 429 after
+      # 5-10 rapid requests, ~60-120s recovery, no Retry-After) means one scheduled
+      # run cannot reliably finish the full 40-seed-prefix crawl inside this job's
+      # 6-hour timeout. update_bulgaria.py checkpoints progress across runs via
+      # bulgaria_crawl_state.json + the accumulated bulgaria_reg.parquet itself —
+      # so this step pulls both back down before crawling. `|| true` on each
+      # because the very first run ever has neither file in R2 yet, which is a
+      # legitimate "nothing accumulated so far" starting state, not a failure.
+      - name: Download previous checkpoint state and accumulated output from Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp s3://diliguard-sanctions-test/bulgaria_reg.parquet bulgaria_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com || true
+          aws s3 cp s3://diliguard-sanctions-test/bulgaria_crawl_state.json bulgaria_crawl_state.json --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com || true
+
       - name: Download and Process Data
         env:
           PYTHONUNBUFFERED: "1"
@@ -38,3 +55,4 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           aws s3 cp bulgaria_reg.parquet s3://diliguard-sanctions-test/bulgaria_reg.parquet --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          aws s3 cp bulgaria_crawl_state.json s3://diliguard-sanctions-test/bulgaria_crawl_state.json --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
