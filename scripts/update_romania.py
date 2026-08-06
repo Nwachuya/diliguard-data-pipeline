@@ -157,10 +157,10 @@ def main():
         sys.exit(1)
 
     try:
-        firme_df = pl.read_csv(FIRME_LOCAL_CSV, separator="^", infer_schema_length=0, quote_char='"',
+        firme_df = pl.read_csv(FIRME_LOCAL_CSV, separator="^", infer_schema_length=0, quote_char=None,
                                 truncate_ragged_lines=True)
-        stare_firma_df = pl.read_csv(STARE_FIRMA_LOCAL_CSV, separator="^", infer_schema_length=0, quote_char='"')
-        nomenclator_df = pl.read_csv(NOMENCLATOR_LOCAL_CSV, separator="^", infer_schema_length=0, quote_char='"')
+        stare_firma_df = pl.read_csv(STARE_FIRMA_LOCAL_CSV, separator="^", infer_schema_length=0, quote_char=None)
+        nomenclator_df = pl.read_csv(NOMENCLATOR_LOCAL_CSV, separator="^", infer_schema_length=0, quote_char=None)
 
         code_to_label = {
             record["COD"]: record["DENUMIRE"]

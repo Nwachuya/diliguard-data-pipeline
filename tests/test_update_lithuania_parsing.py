@@ -67,6 +67,8 @@ def test_lithuania_pagination_and_field_resolution(monkeypatch, tmp_path):
     pages = [PAGE_1, PAGE_2]
 
     def _fake_get(url, **kwargs):
+        if not pages:
+            return _FakeResponse({"_data": []})
         return _FakeResponse(pages.pop(0))
 
     monkeypatch.setattr(mod, "get_with_retry", _fake_get)

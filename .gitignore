@@ -5,3 +5,4 @@ __pycache__/
 *.csv
 *.zip
 *.json.zip
+bulgaria_crawl_state.json

@@ -71,10 +71,10 @@ INTER_PAGE_DELAY_SECONDS = 1.0
 MAX_ROWS = int(os.environ.get("LITHUANIA_MAX_ROWS", "0")) or None
 
 
-def _page_url(cursor: str | None) -> str:
+def _page_url(offset: int) -> str:
     parts = [f"select({SELECT_FIELDS})", f"limit({PAGE_SIZE})"]
-    if cursor:
-        parts.append(f'page("{cursor}")')
+    if offset > 0:
+        parts.append(f"offset({offset})")
     parts.append("format(json)")
     return f"{BASE_URL}?{'&'.join(parts)}"
 
@@ -103,12 +103,12 @@ def _row_from_record(record: dict) -> dict | None:
 def main():
     print("Crawling Lithuania JAR (Register of Legal Entities) open data via data.gov.lt Spinta API...")
     rows: list[dict] = []
-    cursor = None
+    offset = 0
     page_count = 0
 
     try:
         while True:
-            url = _page_url(cursor)
+            url = _page_url(offset)
             response = get_with_retry(url, timeout=60)
             try:
                 payload = response.json()
@@ -120,7 +120,11 @@ def main():
             if payload.get("errors"):
                 raise ValueError(f"API returned errors: {payload['errors']}")
 
-            for record in payload.get("_data") or []:
+            data = payload.get("_data") or []
+            if not data:
+                break
+
+            for record in data:
                 row = _row_from_record(record)
                 if row:
                     rows.append(row)
@@ -133,9 +137,7 @@ def main():
                 print(f"Reached LITHUANIA_MAX_ROWS={MAX_ROWS} cap — stopping crawl early (local verification mode).")
                 break
 
-            cursor = (payload.get("_page") or {}).get("next")
-            if not cursor:
-                break
+            offset += PAGE_SIZE
             time.sleep(INTER_PAGE_DELAY_SECONDS)
     except (requests.RequestException, ValueError) as e:
         print(f"FATAL: failed to crawl Lithuania JAR open data: {e}", file=sys.stderr)
