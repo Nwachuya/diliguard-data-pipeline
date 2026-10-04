@@ -66,7 +66,7 @@ def _resolve_columns(con, csv_path: str) -> dict:
     ask DuckDB for the names it produced and match on the stripped form.
     """
     described = con.execute(
-        f"DESCRIBE SELECT * FROM read_csv_auto({_sql_str(csv_path)}, all_varchar=true, header=true)"
+        f"DESCRIBE SELECT * FROM read_csv_auto({_sql_str(csv_path)}, all_varchar=true, header=true, ignore_errors=true, null_padding=true)"
     ).fetchall()
     return {row[0].strip(): row[0] for row in described}
 
@@ -108,10 +108,13 @@ def main():
         if os.path.exists(ZIP_LOCAL_PATH):
             os.remove(ZIP_LOCAL_PATH)
 
+    temp_spill = "tmp_duckdb_uk"
+    os.makedirs(temp_spill, exist_ok=True)
     try:
         con = duckdb.connect()
-        con.execute("SET memory_limit='4GB';")
-        con.execute("SET temp_directory='tmp_duckdb_uk';")
+        con.execute("PRAGMA threads=2;")
+        con.execute("PRAGMA memory_limit='3.5GB';")
+        con.execute(f"PRAGMA temp_directory='{temp_spill}';")
 
         columns = _resolve_columns(con, CSV_LOCAL_PATH)
         required = ["CompanyName", "CompanyNumber", "CompanyStatus", *ADDRESS_FIELDS]
@@ -140,11 +143,13 @@ def main():
                     {_sql_str(zip_url)} AS source_url,
                     {_sql_str(fetched_at)} AS fetched_at,
                     {_sql_str(PIPELINE_VERSION)} AS pipeline_version
-                FROM read_csv_auto({_sql_str(CSV_LOCAL_PATH)}, all_varchar=true, header=true)
+                FROM read_csv_auto({_sql_str(CSV_LOCAL_PATH)}, all_varchar=true, header=true, ignore_errors=true, null_padding=true)
             ) TO {_sql_str(OUTPUT_PATH)} (FORMAT PARQUET);
         """)
+        con.close()
 
-        row_count = con.execute(
+        con_verify = duckdb.connect()
+        row_count = con_verify.execute(
             f"SELECT COUNT(*) FROM read_parquet({_sql_str(OUTPUT_PATH)})"
         ).fetchone()[0]
         if row_count == 0:
@@ -155,9 +160,10 @@ def main():
             for c in ("company_name", "registration_number", "status")
             for s in KNOWN_FAKE_SENTINELS
         )
-        fake_hits = con.execute(
+        fake_hits = con_verify.execute(
             f"SELECT COUNT(*) FROM read_parquet({_sql_str(OUTPUT_PATH)}) WHERE {sentinel_clause}"
         ).fetchone()[0]
+        con_verify.close()
         if fake_hits > 0:
             raise RuntimeError(f"{fake_hits} row(s) matched a banned fake-data sentinel")
     except Exception as e:
@@ -168,6 +174,8 @@ def main():
     finally:
         if os.path.exists(CSV_LOCAL_PATH):
             os.remove(CSV_LOCAL_PATH)
+        import shutil
+        shutil.rmtree(temp_spill, ignore_errors=True)
 
     print(f"Wrote {row_count} real UK Companies House rows to {OUTPUT_PATH}", flush=True)
 
