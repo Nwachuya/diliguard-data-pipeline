@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "0 2 * * *" # Runs every day at 2:00 AM UTC
   workflow_dispatch: # Allows manual trigger
+  push:
+    paths:
+      - 'scripts/update_sanctions.py'
+      - '.github/workflows/update_sanctions.yml'
 
 jobs:
   process-and-upload:
