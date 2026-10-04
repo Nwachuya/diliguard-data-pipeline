@@ -55,7 +55,7 @@ from common.parquet_io import write_registry_parquet
 
 BASE_URL = "https://get.data.gov.lt/datasets/gov/rc/jar/iregistruoti/JuridinisAsmuo"
 SELECT_FIELDS = "ja_kodas,ja_pavadinimas,pilnas_adresas,adresas,statusas.pavadinimas,forma.pavadinimas"
-PAGE_SIZE = 500
+PAGE_SIZE = 250
 # Observed live: hammering this endpoint with rapid back-to-back requests (as this
 # script's own investigation did) trips an nginx-based WAF that returns a 200 OK
 # HTML captcha challenge page instead of JSON — not a 5xx, so get_with_retry's

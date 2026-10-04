@@ -6,6 +6,11 @@ on:
     # snapshot daily — run once a day, shortly after the source's own daily refresh.
     - cron: "0 6 * * *"
   workflow_dispatch: # Allows manual trigger
+  push:
+    paths:
+      - 'scripts/update_ireland.py'
+      - 'scripts/common/http.py'
+      - '.github/workflows/update_ireland.yml'
 
 jobs:
   process-and-upload:

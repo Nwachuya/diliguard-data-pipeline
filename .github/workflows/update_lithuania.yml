@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 6 * * 1" # Runs every Monday at 6:00 AM UTC (JAR is a live register of ~539k legal entities, not a dated bulk file — like Slovakia RPVS, a weekly full crawl is a considerate cadence given the paginated Spinta API)
   workflow_dispatch: # Allows manual trigger
+  push:
+    paths:
+      - 'scripts/update_lithuania.py'
+      - 'scripts/common/http.py'
+      - '.github/workflows/update_lithuania.yml'
 
 jobs:
   process-and-upload:
