@@ -44,21 +44,30 @@ def main():
     # 3. Convert CSV to Parquet using Polars
     print("Converting targets.simple.csv to Parquet format using Polars...")
     import polars as pl
+    import gc
     
-    # Read the CSV entirely into memory (the 500MB file will comfortably fit in the 7GB runner RAM) and write to Parquet
+    # Read the CSV entirely into memory and write to Parquet
     df = pl.read_csv('targets.simple.csv', ignore_errors=True, infer_schema_length=0)
     df.write_parquet('targets.simple.parquet')
+    del df
+    gc.collect()
     
     print("Conversion successful. Output: targets.simple.parquet")
 
     # Cleanup the raw CSV to save disk space before Wrangler upload
     os.remove("targets.simple.csv")
+    
     # 4. Convert FTM JSON to a Key-Value Parquet file
     if ftm_url and os.path.exists("entities.ftm.json"):
         print("Converting entities.ftm.json to a Key-Value Parquet file...")
-        import duckdb
-        duckdb.sql("SET memory_limit='4GB';")
-        duckdb.sql("SET temp_directory='tmp.duckdb';")
+        spill_dir = "/tmp/duckdb_sanctions_spill"
+        os.makedirs(spill_dir, exist_ok=True)
+        
+        con = duckdb.connect()
+        con.execute("PRAGMA threads=2;")
+        con.execute("PRAGMA memory_limit='3.5GB';")
+        con.execute(f"PRAGMA temp_directory='{spill_dir}';")
+        
         query = """
         COPY (
             SELECT 
@@ -67,10 +76,13 @@ def main():
             FROM read_json_objects('entities.ftm.json', format='newline_delimited')
         ) TO 'entities.ftm.parquet' (FORMAT PARQUET);
         """
-        duckdb.sql(query)
+        con.execute(query)
+        con.close()
+        
         print("FTM JSON conversion successful. Output: entities.ftm.parquet")
         os.remove("entities.ftm.json")
-        print("Cleaned up temporary FTM JSON file.")
+        shutil.rmtree(spill_dir, ignore_errors=True)
+        print("Cleaned up temporary FTM JSON and spill files.")
 
 if __name__ == "__main__":
     main()
