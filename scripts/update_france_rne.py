@@ -19,18 +19,35 @@ import os
 import sys
 
 import duckdb
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.schema import PIPELINE_VERSION, KNOWN_FAKE_SENTINELS
 
-SIRENE_STOCK_UNITE_LEGALE_URL = (
-    "https://static.data.gouv.fr/resources/base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret"
-    "/20260801-073937/stock-stockunitelegale-parquet.parquet"
+SIRENE_DATASET_API = (
+    "https://www.data.gouv.fr/api/1/datasets/base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret/"
 )
 OUTPUT_PATH = "france_rne.parquet"
 
 
+def get_latest_sirene_parquet_url() -> str:
+    """Fetch the latest active StockUniteLegale Parquet URL dynamically from data.gouv.fr API."""
+    print("Resolving latest active Sirene StockUniteLegale Parquet URL from data.gouv.fr API...")
+    r = requests.get(SIRENE_DATASET_API, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    for res in data.get("resources", []):
+        url = res.get("url", "")
+        fmt = (res.get("format") or "").lower()
+        if fmt == "parquet" or url.endswith(".parquet"):
+            if "stockunitelegale" in url.lower() and "historique" not in url.lower():
+                print(f"Discovered active Sirene Parquet URL: {url}")
+                return url
+    raise ValueError("Could not find StockUniteLegale parquet resource in data.gouv.fr dataset API")
+
+
 def main():
+    sirene_url = get_latest_sirene_parquet_url()
     print("Querying INSEE Base Sirene (StockUniteLegale) for active French legal units...")
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
@@ -48,10 +65,10 @@ def main():
                 END AS status,
                 CAST(NULL AS VARCHAR) AS ubo_names,
                 'FR' AS jurisdiction,
-                '{SIRENE_STOCK_UNITE_LEGALE_URL}' AS source_url,
+                '{sirene_url}' AS source_url,
                 strftime(now(), '%Y-%m-%dT%H:%M:%S+00:00') AS fetched_at,
                 '{PIPELINE_VERSION}' AS pipeline_version
-            FROM read_parquet('{SIRENE_STOCK_UNITE_LEGALE_URL}')
+            FROM read_parquet('{sirene_url}')
             WHERE etatAdministratifUniteLegale = 'A'
               AND (denominationUniteLegale IS NOT NULL OR nomUniteLegale IS NOT NULL)
         ) TO '{OUTPUT_PATH}' (FORMAT PARQUET);

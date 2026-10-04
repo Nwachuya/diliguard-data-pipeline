@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "0 3 3 * *" # Runs on the 3rd of every month at 3:00 AM UTC (Sirene stock files are published monthly, ~1st of month)
   workflow_dispatch: # Allows manual trigger
+  push:
+    paths:
+      - 'scripts/update_france_rne.py'
+      - '.github/workflows/update_france_rne.yml'
 
 jobs:
   process-and-upload:
